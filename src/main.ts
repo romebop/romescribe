@@ -1,10 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 // --- Elements ---
+const settingsView = document.getElementById("settings-view")!;
+const logsView = document.getElementById("logs-view")!;
+const logsContent = document.getElementById("logs-content")!;
 const modelList = document.getElementById("model-list")!;
 const gpuToggle = document.getElementById("gpu-toggle")! as HTMLInputElement;
 const hotkeyInput = document.getElementById("hotkey-input")! as HTMLInputElement;
-const hotkeyCheck = document.getElementById("hotkey-check")!;
+const hotkeySave = document.getElementById("hotkey-save")!;
 
 // --- Types ---
 interface ModelEntry {
@@ -31,6 +34,7 @@ interface DownloadProgress {
 // --- State ---
 let downloadingModel: string | null = null;
 let currentHotkey = "";
+let pendingHotkey = "";
 
 // --- Helpers ---
 function formatBytes(bytes: number): string {
@@ -48,7 +52,9 @@ async function loadSettings() {
 
   gpuToggle.checked = settings.use_gpu;
   currentHotkey = settings.hotkey;
+  pendingHotkey = settings.hotkey;
   hotkeyInput.value = settings.hotkey;
+  updateSaveButton();
   renderModelList(models);
 }
 
@@ -140,7 +146,7 @@ gpuToggle.addEventListener("change", async () => {
 });
 
 // --- Hotkey ---
-hotkeyInput.addEventListener("keydown", async (e) => {
+hotkeyInput.addEventListener("keydown", (e) => {
   e.preventDefault();
   const modifiers: string[] = [];
   if (e.metaKey) modifiers.push("Cmd");
@@ -148,42 +154,51 @@ hotkeyInput.addEventListener("keydown", async (e) => {
   if (e.altKey) modifiers.push("Option");
   if (e.shiftKey) modifiers.push("Shift");
 
-  // Use e.code for the physical key (immune to IME/Option key character mapping)
   const code = e.code;
-  // Only modifier keys pressed — wait for the actual key
   if (["MetaLeft", "MetaRight", "ControlLeft", "ControlRight",
        "AltLeft", "AltRight", "ShiftLeft", "ShiftRight"].includes(code)) return;
-  // Need at least one modifier + a key
   if (modifiers.length === 0) return;
 
-  // Map e.code to our key name format
   let keyName: string;
   if (code === "Space") keyName = "Space";
   else if (code === "Enter") keyName = "Enter";
   else if (code === "Escape") keyName = "Escape";
   else if (code === "Tab") keyName = "Tab";
-  else if (code.startsWith("Key")) keyName = code.slice(3); // "KeyR" -> "R"
-  else if (code.startsWith("Digit")) keyName = code.slice(5); // "Digit1" -> "1"
-  else if (code.startsWith("F") && /^F\d+$/.test(code)) keyName = code; // "F1" etc
+  else if (code.startsWith("Key")) keyName = code.slice(3);
+  else if (code.startsWith("Digit")) keyName = code.slice(5);
+  else if (code.startsWith("F") && /^F\d+$/.test(code)) keyName = code;
   else keyName = code;
 
-  const newHotkey = [...modifiers, keyName].join("+");
-  hotkeyInput.value = newHotkey;
+  pendingHotkey = [...modifiers, keyName].join("+");
+  hotkeyInput.value = pendingHotkey;
+  updateSaveButton();
+});
 
-  if (newHotkey === currentHotkey) return;
+function updateSaveButton() {
+  if (pendingHotkey && pendingHotkey !== currentHotkey) {
+    hotkeySave.removeAttribute("disabled");
+    hotkeySave.classList.add("changed");
+  } else {
+    hotkeySave.setAttribute("disabled", "true");
+    hotkeySave.classList.remove("changed");
+  }
+}
 
+hotkeySave.addEventListener("click", async () => {
+  if (!pendingHotkey || pendingHotkey === currentHotkey) return;
+  hotkeySave.textContent = "Saving...";
+  hotkeySave.setAttribute("disabled", "true");
   try {
-    await invoke("set_hotkey", { hotkey: newHotkey });
-    currentHotkey = newHotkey;
-    hotkeyCheck.textContent = "\u2713";
-    hotkeyCheck.classList.add("visible");
-    setTimeout(() => { hotkeyCheck.classList.remove("visible"); }, 1200);
+    await invoke("set_hotkey", { hotkey: pendingHotkey });
+    currentHotkey = pendingHotkey;
+    updateSaveButton();
   } catch (err) {
     hotkeyInput.value = currentHotkey;
-    hotkeyCheck.textContent = "\u2717";
-    hotkeyCheck.classList.add("visible");
-    setTimeout(() => { hotkeyCheck.classList.remove("visible"); }, 1200);
+    pendingHotkey = currentHotkey;
+    alert(`Failed to set hotkey: ${err}`);
   }
+  hotkeySave.textContent = "Save";
+  hotkeySave.removeAttribute("disabled");
 });
 
 // --- Events ---
@@ -211,9 +226,29 @@ listen<string>("download-error", (event) => {
   console.error("Download error:", event.payload);
 });
 
-listen<string>("navigate", () => {
-  loadSettings();
+listen<string>("navigate", (event) => {
+  const view = event.payload;
+  if (view === "settings") {
+    settingsView.classList.remove("hidden");
+    logsView.classList.add("hidden");
+    loadSettings();
+  } else if (view === "logs") {
+    settingsView.classList.add("hidden");
+    logsView.classList.remove("hidden");
+    loadLogs();
+  }
 });
+
+// --- Logs ---
+async function loadLogs() {
+  const logs = await invoke<string[]>("get_logs");
+  if (logs.length === 0) {
+    logsContent.textContent = "No logs yet";
+  } else {
+    logsContent.textContent = logs.join("\n");
+  }
+  logsContent.scrollTop = logsContent.scrollHeight;
+}
 
 // --- Init ---
 loadSettings();

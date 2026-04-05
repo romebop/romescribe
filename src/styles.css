@@ -232,13 +232,14 @@ button:disabled {
 }
 
 /* Hotkey */
-.hotkey-wrapper {
-  position: relative;
-  width: 100%;
+.hotkey-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
 }
 
 .hotkey-input {
-  width: 100%;
+  flex: 1;
   padding: 8px 12px;
   background: #222;
   border: 1px solid #333;
@@ -254,24 +255,56 @@ button:disabled {
   border-color: #4caf50;
 }
 
-.hotkey-check {
-  position: absolute;
-  right: 10px;
-  top: 50%;
-  transform: translateY(-50%);
-  color: #4caf50;
-  font-size: 14px;
-  opacity: 0;
-  transition: opacity 0.2s ease;
-  pointer-events: none;
+.btn-save {
+  padding: 5px 12px;
+  border-radius: 5px;
+  border: none;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  background: #2a2a2a;
+  color: #888;
 }
 
-.hotkey-check.visible {
-  opacity: 1;
+.btn-save:hover {
+  background: #333;
+  color: #bbb;
+}
+
+.btn-save.changed {
+  background: #2d4a2d;
+  color: #6fcf6f;
+}
+
+.btn-save.changed:hover {
+  background: #3a5e3a;
 }
 
 .hotkey-hint {
   font-size: 11px;
   color: #444;
   margin-top: 6px;
+}
+
+/* Logs View */
+#logs-view {
+  display: flex;
+  flex-direction: column;
+  padding: 24px;
+  height: 100vh;
+}
+
+#logs-content {
+  flex: 1;
+  background: #222;
+  border-radius: 10px;
+  padding: 12px;
+  font-family: "SF Mono", "Menlo", monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  color: #888;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-wrap: break-word;
 }

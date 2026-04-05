@@ -13,14 +13,14 @@ impl Transcriber {
         Ok(Self { ctx })
     }
 
-    pub fn transcribe(&self, audio: &[f32]) -> Result<String, String> {
+    pub fn transcribe(&self, audio: &[f32], english_only: bool) -> Result<String, String> {
         let mut state = self
             .ctx
             .create_state()
             .map_err(|e| format!("Failed to create whisper state: {}", e))?;
 
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-        params.set_language(None); // auto-detect language
+        params.set_language(if english_only { Some("en") } else { None });
         params.set_print_progress(false);
         params.set_print_timestamps(false);
         params.set_single_segment(false);

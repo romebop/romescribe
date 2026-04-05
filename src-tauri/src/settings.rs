@@ -16,7 +16,7 @@ fn default_hotkey() -> String {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            selected_model: "base".to_string(),
+            selected_model: "small.en".to_string(),
             use_gpu: true,
             hotkey: default_hotkey(),
         }
@@ -54,4 +54,3 @@ pub fn save_settings(settings: &Settings) -> Result<(), String> {
     std::fs::write(&path, json).map_err(|e| format!("Failed to write settings: {}", e))?;
     Ok(())
 }
-

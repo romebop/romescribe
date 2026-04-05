@@ -16,59 +16,19 @@ use tauri::{
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 use transcribe::Transcriber;
 
-/// Insert text into the focused text field via clipboard paste (Cmd+V).
-/// Peeks at the character before the cursor to decide whether to prepend a space.
+/// Insert text into the focused text field via clipboard paste.
 /// Saves and restores the user's clipboard.
 fn insert_text(text: &str) -> Result<(), String> {
-    let escaped = text
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
+    let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
 
     let script = format!(
         r#"
 use scripting additions
-tell application "System Events"
-    -- Save current clipboard
-    set savedClip to the clipboard
-
-    -- Clear clipboard so empty selection = empty clipboard
-    set the clipboard to ""
-
-    -- Select char before cursor
-    key code 123 using shift down
-    delay 0.02
-
-    -- Copy selection
-    keystroke "c" using command down
-    delay 0.05
-
-    -- Read what we got
-    set prevChar to the clipboard as text
-
-    -- Deselect (move right to restore cursor)
-    key code 124
-    delay 0.02
-
-    -- Decide whether to add space
-    set needsSpace to false
-    if prevChar is not "" and prevChar is not " " and prevChar is not (ASCII character 10) and prevChar is not (ASCII character 13) and prevChar is not (ASCII character 9) then
-        set needsSpace to true
-    end if
-
-    -- Set clipboard to transcription text (with space if needed)
-    if needsSpace then
-        set the clipboard to " {escaped}"
-    else
-        set the clipboard to "{escaped}"
-    end if
-
-    -- Paste
-    keystroke "v" using command down
-    delay 0.05
-
-    -- Restore original clipboard
-    set the clipboard to savedClip
-end tell
+set savedClip to the clipboard
+set the clipboard to "{escaped}"
+tell application "System Events" to keystroke "v" using command down
+delay 0.05
+set the clipboard to savedClip
 "#
     );
 
@@ -164,6 +124,14 @@ struct AppState {
     cancel_download: AtomicBool,
     current_shortcut: Mutex<Option<Shortcut>>,
     record_start_time: Mutex<Option<std::time::Instant>>,
+    logs: Mutex<Vec<String>>,
+}
+
+fn add_log(state: &AppState, msg: &str) {
+    let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
+    let entry = format!("[{}] {}", timestamp, msg);
+    println!("{}", entry);
+    state.logs.lock().unwrap().push(entry);
 }
 
 fn reload_transcriber(state: &AppState) -> Result<(), String> {
@@ -171,15 +139,12 @@ fn reload_transcriber(state: &AppState) -> Result<(), String> {
     let path = model::model_path(&settings.selected_model)?;
     if !path.exists() {
         *state.transcriber.lock().unwrap() = None;
-        return Err("Model file not found".to_string());
+        return Err(format!("Model '{}' not found", settings.selected_model));
     }
-    println!(
-        "[romescribe] Loading model {} (gpu={})",
-        settings.selected_model, settings.use_gpu
-    );
+    add_log(state, &format!("Loading model {} (gpu={})", settings.selected_model, settings.use_gpu));
     let t = Transcriber::new(path.to_str().unwrap(), settings.use_gpu)?;
     *state.transcriber.lock().unwrap() = Some(t);
-    println!("[romescribe] Model loaded successfully");
+    add_log(state, "Model loaded");
     Ok(())
 }
 
@@ -426,6 +391,11 @@ fn cancel_download(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn get_logs(state: State<'_, AppState>) -> Vec<String> {
+    state.logs.lock().unwrap().clone()
+}
+
 // --- Recording ---
 
 #[tauri::command]
@@ -438,35 +408,42 @@ async fn toggle_recording(
 
 fn do_toggle_inner(state: &AppState, app: &AppHandle) -> Result<Option<String>, String> {
     if state.is_recording.load(Ordering::SeqCst) {
-        println!("[romescribe] Stopping recording...");
+        add_log(state, "Stopping recording...");
         state.is_recording.store(false, Ordering::SeqCst);
         set_tray_recording(app, false);
         let _ = app.emit("recording-stopped", ());
 
         let audio = state.recorder.stop();
-        println!("[romescribe] Got {} audio samples", audio.len());
+        add_log(state, &format!("Got {} audio samples", audio.len()));
 
         if audio.is_empty() {
+            add_log(state, "Error: No audio recorded");
             let _ = app.emit("error", "No audio recorded");
             return Err("No audio recorded".to_string());
         }
 
         let _ = app.emit("transcribing", ());
 
-        println!("[romescribe] Starting transcription...");
+        add_log(state, "Transcribing...");
         let text = {
             let transcriber_guard = state.transcriber.lock().unwrap();
             match transcriber_guard.as_ref() {
-                Some(t) => t.transcribe(&audio)?,
+                Some(t) => {
+                    let model_id = state.settings.lock().unwrap().selected_model.clone();
+                    let english_only = model_id.ends_with(".en");
+                    t.transcribe(&audio, english_only)?
+                }
                 None => {
+                    add_log(state, "Error: Model not loaded");
                     let _ = app.emit("error", "Model not loaded");
                     return Err("Model not loaded".to_string());
                 }
             }
         };
-        println!("[romescribe] Transcription result: {:?}", text);
+        add_log(state, &format!("Transcription: \"{}\"", text));
 
         if text.is_empty() {
+            add_log(state, "No speech detected");
             let _ = app.emit("error", "No speech detected");
             return Err("No speech detected".to_string());
         }
@@ -474,15 +451,16 @@ fn do_toggle_inner(state: &AppState, app: &AppHandle) -> Result<Option<String>, 
         // Insert text directly into focused field
         std::thread::sleep(std::time::Duration::from_millis(50));
         if let Err(e) = insert_text(&text) {
-            eprintln!("[romescribe] Failed to insert text: {}", e);
+            add_log(state, &format!("Insert failed: {}", e));
+        } else {
+            add_log(state, "Text inserted");
         }
-        println!("[romescribe] Text inserted");
 
         let _ = app.emit("transcription-complete", &text);
 
         Ok(Some(text))
     } else {
-        println!("[romescribe] Starting recording...");
+        add_log(state, "Recording started");
         state.recorder.start()?;
         state.is_recording.store(true, Ordering::SeqCst);
         set_tray_recording(app, true);
@@ -512,13 +490,6 @@ pub fn run() {
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |app, _shortcut, event| {
-                    // Ignore hotkey while settings window is visible
-                    if let Some(window) = app.get_webview_window("main") {
-                        if window.is_visible().unwrap_or(false) {
-                            return;
-                        }
-                    }
-
                     let state = app.state::<AppState>();
                     match event.state() {
                         ShortcutState::Pressed => {
@@ -557,12 +528,12 @@ pub fn run() {
                 settings.selected_model, settings.use_gpu, settings.hotkey
             );
 
-            // Load model if available
+            // Load model if available, or auto-download small.en on first launch
             let transcriber = if model::is_model_downloaded(&settings.selected_model) {
                 let path = model::model_path(&settings.selected_model)?;
                 match Transcriber::new(path.to_str().unwrap(), settings.use_gpu) {
                     Ok(t) => {
-                        println!("[romescribe] Whisper model loaded successfully");
+                        println!("[romescribe] Model '{}' loaded", settings.selected_model);
                         Some(t)
                     }
                     Err(e) => {
@@ -571,10 +542,94 @@ pub fn run() {
                     }
                 }
             } else {
-                eprintln!(
-                    "[romescribe] Model '{}' not found. Use settings to download it.",
-                    settings.selected_model
-                );
+                // Auto-download default model on first launch
+                let default_model = "small.en";
+                println!("[romescribe] No model found. Auto-downloading {}...", default_model);
+                let app_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    let info = match model::get_model_info(default_model) {
+                        Some(i) => i,
+                        None => return,
+                    };
+
+                    let models_dir = match model::models_dir() {
+                        Ok(d) => d,
+                        Err(_) => return,
+                    };
+
+                    let part_path = models_dir.join(format!("{}.part", info.filename));
+                    let final_path = models_dir.join(info.filename);
+
+                    let client = match reqwest::blocking::Client::new()
+                        .get(info.url)
+                        .send() {
+                        Ok(r) if r.status().is_success() => r,
+                        _ => {
+                            eprintln!("[romescribe] Failed to download default model");
+                            return;
+                        }
+                    };
+
+                    let mut response = client;
+                    let mut file = match std::fs::File::create(&part_path) {
+                        Ok(f) => f,
+                        Err(_) => return,
+                    };
+
+                    let mut downloaded: u64 = 0;
+                    let mut last_emit = std::time::Instant::now();
+                    let mut buffer = [0u8; 65536];
+                    let total_size = info.size_bytes;
+
+                    loop {
+                        let bytes_read = match response.read(&mut buffer) {
+                            Ok(0) => break,
+                            Ok(n) => n,
+                            Err(_) => break,
+                        };
+
+                        if std::io::Write::write_all(&mut file, &buffer[..bytes_read]).is_err() {
+                            break;
+                        }
+
+                        downloaded += bytes_read as u64;
+
+                        if last_emit.elapsed() >= std::time::Duration::from_millis(100) {
+                            let _ = app_handle.emit(
+                                "download-progress",
+                                DownloadProgress {
+                                    model_id: default_model.to_string(),
+                                    downloaded_bytes: downloaded,
+                                    total_bytes: total_size,
+                                },
+                            );
+                            last_emit = std::time::Instant::now();
+                        }
+                    }
+
+                    if std::fs::rename(&part_path, &final_path).is_err() {
+                        return;
+                    }
+
+                    println!("[romescribe] Default model downloaded. Loading...");
+
+                    // Update settings and load the model
+                    let state = app_handle.state::<AppState>();
+                    {
+                        let mut s = state.settings.lock().unwrap();
+                        s.selected_model = default_model.to_string();
+                        let _ = settings::save_settings(&s);
+                    }
+                    let use_gpu = state.settings.lock().unwrap().use_gpu;
+                    if let Ok(path) = model::model_path(default_model) {
+                        if let Ok(t) = Transcriber::new(path.to_str().unwrap(), use_gpu) {
+                            *state.transcriber.lock().unwrap() = Some(t);
+                            add_log(&state, "Default model (small.en) ready");
+                            let _ = app_handle.emit("model-loaded", ());
+                            println!("[romescribe] Model '{}' loaded and ready", default_model);
+                        }
+                    }
+                });
                 None
             };
 
@@ -589,11 +644,12 @@ pub fn run() {
                 e
             })?;
 
-            // System tray: Settings + Quit only
+            // System tray
             let settings_item = MenuItem::with_id(app, "settings", "Settings...", true, None::<&str>)?;
+            let logs_item = MenuItem::with_id(app, "logs", "Logs...", true, None::<&str>)?;
             let sep = PredefinedMenuItem::separator(app)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&settings_item, &sep, &quit_item])?;
+            let menu = Menu::with_items(app, &[&settings_item, &logs_item, &sep, &quit_item])?;
 
             app.manage(AppState {
                 recorder: AudioRecorder::new(),
@@ -604,6 +660,7 @@ pub fn run() {
                 cancel_download: AtomicBool::new(false),
                 current_shortcut: Mutex::new(Some(shortcut)),
                 record_start_time: Mutex::new(None),
+                logs: Mutex::new(Vec::new()),
             });
 
             let _tray = TrayIconBuilder::with_id("main")
@@ -614,6 +671,13 @@ pub fn run() {
                     match event.id().as_ref() {
                         "settings" => {
                             let _ = app.emit("navigate", "settings");
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        "logs" => {
+                            let _ = app.emit("navigate", "logs");
                             if let Some(window) = app.get_webview_window("main") {
                                 let _ = window.show();
                                 let _ = window.set_focus();
@@ -647,6 +711,7 @@ pub fn run() {
             set_hotkey,
             download_model,
             cancel_download,
+            get_logs,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

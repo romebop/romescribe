@@ -10,11 +10,11 @@
     <div id="settings-view">
       <div class="settings-section">
         <h2>Hotkey</h2>
-        <div class="hotkey-wrapper">
+        <div class="hotkey-row">
           <input type="text" id="hotkey-input" class="hotkey-input" readonly placeholder="Press keys..." />
-          <span id="hotkey-check" class="hotkey-check"></span>
+          <button id="hotkey-save" class="btn-save">Save</button>
         </div>
-        <p class="hotkey-hint">Click and press your desired key combination</p>
+        <p class="hotkey-hint">Click the field, press your desired key combination, then click Save</p>
       </div>
 
       <div class="settings-section">
@@ -35,6 +35,10 @@
           </label>
         </div>
       </div>
+    </div>
+
+    <div id="logs-view" class="hidden">
+      <div id="logs-content"></div>
     </div>
 
     <script type="module" src="/src/main.ts"></script>
