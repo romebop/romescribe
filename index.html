@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>romescribe</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div id="settings-view">
+      <div class="settings-section">
+        <h2>Hotkey</h2>
+        <div class="hotkey-wrapper">
+          <input type="text" id="hotkey-input" class="hotkey-input" readonly placeholder="Press keys..." />
+          <span id="hotkey-check" class="hotkey-check"></span>
+        </div>
+        <p class="hotkey-hint">Click and press your desired key combination</p>
+      </div>
+
+      <div class="settings-section">
+        <h2>Model</h2>
+        <div id="model-list"></div>
+      </div>
+
+      <div class="settings-section">
+        <h2>Performance</h2>
+        <div class="toggle-row">
+          <div>
+            <span class="toggle-label">GPU Acceleration (Metal)</span>
+            <span class="toggle-desc">Uses Apple Silicon GPU for faster inference</span>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" id="gpu-toggle" />
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
