@@ -37,6 +37,25 @@ let currentHotkey = "";
 let pendingHotkey = "";
 
 // --- Helpers ---
+function formatHotkeyDisplay(hotkey: string): string {
+  return hotkey
+    .split("+")
+    .map((part) => {
+      switch (part) {
+        case "Cmd": return "\u2318";
+        case "Ctrl": return "\u2303";
+        case "Option": return "\u2325";
+        case "Shift": return "\u21E7";
+        case "Space": return "\u2423";
+        case "Enter": return "\u23CE";
+        case "Tab": return "\u21E5";
+        case "Escape": return "\u238B";
+        default: return part;
+      }
+    })
+    .join(" + ");
+}
+
 function formatBytes(bytes: number): string {
   if (bytes >= 1_000_000_000) return (bytes / 1_000_000_000).toFixed(1) + " GB";
   if (bytes >= 1_000_000) return (bytes / 1_000_000).toFixed(0) + " MB";
@@ -53,7 +72,7 @@ async function loadSettings() {
   gpuToggle.checked = settings.use_gpu;
   currentHotkey = settings.hotkey;
   pendingHotkey = settings.hotkey;
-  hotkeyInput.value = settings.hotkey;
+  hotkeyInput.value = formatHotkeyDisplay(settings.hotkey);
   updateSaveButton();
   renderModelList(models);
 }
@@ -170,7 +189,7 @@ hotkeyInput.addEventListener("keydown", (e) => {
   else keyName = code;
 
   pendingHotkey = [...modifiers, keyName].join("+");
-  hotkeyInput.value = pendingHotkey;
+  hotkeyInput.value = formatHotkeyDisplay(pendingHotkey);
   updateSaveButton();
 });
 
@@ -193,7 +212,7 @@ hotkeySave.addEventListener("click", async () => {
     currentHotkey = pendingHotkey;
     updateSaveButton();
   } catch (err) {
-    hotkeyInput.value = currentHotkey;
+    hotkeyInput.value = formatHotkeyDisplay(currentHotkey);
     pendingHotkey = currentHotkey;
     alert(`Failed to set hotkey: ${err}`);
   }

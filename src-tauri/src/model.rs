@@ -50,7 +50,7 @@ pub const MODELS: &[ModelInfo] = &[
         filename: "ggml-large-v3.bin",
         url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin",
         size_bytes: 3_094_623_691,
-        description: "Best accuracy, multilingual, slowest",
+        description: "Best accuracy, slowest, multilingual",
     },
 ];
 

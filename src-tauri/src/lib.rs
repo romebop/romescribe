@@ -13,35 +13,52 @@ use tauri::{
     tray::TrayIconBuilder,
     AppHandle, Emitter, Manager, State,
 };
+use core_graphics::event::{CGEvent, CGEventFlags, CGKeyCode};
+use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 use transcribe::Transcriber;
 
+const KVK_ANSI_V: CGKeyCode = 0x09;
+
+/// Simulate Cmd+V via CGEvent (direct C API, no subprocess).
+fn simulate_paste() -> Result<(), String> {
+    let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+        .map_err(|_| "Failed to create event source")?;
+
+    let key_down = CGEvent::new_keyboard_event(source.clone(), KVK_ANSI_V, true)
+        .map_err(|_| "Failed to create key down event")?;
+    key_down.set_flags(CGEventFlags::CGEventFlagCommand);
+
+    let key_up = CGEvent::new_keyboard_event(source, KVK_ANSI_V, false)
+        .map_err(|_| "Failed to create key up event")?;
+    key_up.set_flags(CGEventFlags::CGEventFlagCommand);
+
+    key_down.post(core_graphics::event::CGEventTapLocation::HID);
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    key_up.post(core_graphics::event::CGEventTapLocation::HID);
+
+    Ok(())
+}
+
 /// Insert text into the focused text field via clipboard paste.
-/// Saves and restores the user's clipboard.
-fn insert_text(text: &str) -> Result<(), String> {
-    let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
+/// Uses Tauri clipboard API + CGEvent Cmd+V. Saves and restores clipboard.
+fn insert_text(app: &AppHandle, text: &str) -> Result<(), String> {
+    // Save current clipboard
+    let saved = app.clipboard().read_text().unwrap_or_default();
 
-    let script = format!(
-        r#"
-use scripting additions
-set savedClip to the clipboard
-set the clipboard to "{escaped}"
-tell application "System Events" to keystroke "v" using command down
-delay 0.05
-set the clipboard to savedClip
-"#
-    );
+    // Set transcription text
+    app.clipboard()
+        .write_text(text)
+        .map_err(|e| format!("Clipboard write error: {}", e))?;
 
-    let output = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(&script)
-        .output()
-        .map_err(|e| format!("Failed to run osascript: {}", e))?;
+    // Cmd+V via CGEvent
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    simulate_paste()?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("osascript failed: {}", stderr));
-    }
+    // Restore clipboard after paste has been processed
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let _ = app.clipboard().write_text(&saved);
 
     Ok(())
 }
@@ -406,8 +423,16 @@ async fn toggle_recording(
     do_toggle_inner(&state, &app)
 }
 
+fn play_sound(name: &str) {
+    let path = format!("/System/Library/Sounds/{}.aiff", name);
+    std::thread::spawn(move || {
+        let _ = std::process::Command::new("afplay").arg(&path).output();
+    });
+}
+
 fn do_toggle_inner(state: &AppState, app: &AppHandle) -> Result<Option<String>, String> {
     if state.is_recording.load(Ordering::SeqCst) {
+        play_sound("Pop");
         add_log(state, "Stopping recording...");
         state.is_recording.store(false, Ordering::SeqCst);
         set_tray_recording(app, false);
@@ -450,7 +475,7 @@ fn do_toggle_inner(state: &AppState, app: &AppHandle) -> Result<Option<String>, 
 
         // Insert text directly into focused field
         std::thread::sleep(std::time::Duration::from_millis(50));
-        if let Err(e) = insert_text(&text) {
+        if let Err(e) = insert_text(app, &text) {
             add_log(state, &format!("Insert failed: {}", e));
         } else {
             add_log(state, "Text inserted");
@@ -460,11 +485,14 @@ fn do_toggle_inner(state: &AppState, app: &AppHandle) -> Result<Option<String>, 
 
         Ok(Some(text))
     } else {
-        add_log(state, "Recording started");
         state.recorder.start()?;
+        // Wait until audio data is actually flowing before signaling the user
+        state.recorder.wait_for_data(std::time::Duration::from_millis(500));
         state.is_recording.store(true, Ordering::SeqCst);
         set_tray_recording(app, true);
         let _ = app.emit("recording-started", ());
+        play_sound("Tink");
+        add_log(state, "Recording started");
         Ok(None)
     }
 }
@@ -646,7 +674,7 @@ pub fn run() {
 
             // System tray
             let settings_item = MenuItem::with_id(app, "settings", "Settings...", true, None::<&str>)?;
-            let logs_item = MenuItem::with_id(app, "logs", "Logs...", true, None::<&str>)?;
+            let logs_item = MenuItem::with_id(app, "logs", "Session Logs...", true, None::<&str>)?;
             let sep = PredefinedMenuItem::separator(app)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&settings_item, &logs_item, &sep, &quit_item])?;

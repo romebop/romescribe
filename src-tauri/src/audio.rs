@@ -7,7 +7,7 @@ use std::sync::{
 use std::thread;
 
 enum AudioCommand {
-    Start,
+    Start { ready: mpsc::Sender<Result<(), String>> },
     Stop,
 }
 
@@ -65,7 +65,7 @@ impl AudioRecorder {
             // Wait for commands
             while let Ok(cmd) = rx.recv() {
                 match cmd {
-                    AudioCommand::Start => {
+                    AudioCommand::Start { ready } => {
                         buf.lock().unwrap().clear();
                         rec.store(true, Ordering::SeqCst);
 
@@ -104,7 +104,7 @@ impl AudioRecorder {
                                 None,
                             ),
                             _ => {
-                                eprintln!("[romescribe] Unsupported sample format");
+                                let _ = ready.send(Err("Unsupported sample format".to_string()));
                                 continue;
                             }
                         };
@@ -112,15 +112,18 @@ impl AudioRecorder {
                         let stream = match stream {
                             Ok(s) => s,
                             Err(e) => {
-                                eprintln!("[romescribe] Failed to build stream: {}", e);
+                                let _ = ready.send(Err(format!("Failed to build stream: {}", e)));
                                 continue;
                             }
                         };
 
                         if let Err(e) = stream.play() {
-                            eprintln!("[romescribe] Failed to play stream: {}", e);
+                            let _ = ready.send(Err(format!("Failed to play stream: {}", e)));
                             continue;
                         }
+
+                        // Signal that recording is now active
+                        let _ = ready.send(Ok(()));
 
                         // Keep stream alive until stop
                         while rec_clone.load(Ordering::SeqCst) {
@@ -143,13 +146,30 @@ impl AudioRecorder {
         }
     }
 
+    /// Starts recording. Blocks until the audio stream is confirmed running.
     pub fn start(&self) -> Result<(), String> {
+        let (ready_tx, ready_rx) = mpsc::channel();
         self.sender
             .lock()
             .unwrap()
-            .send(AudioCommand::Start)
+            .send(AudioCommand::Start { ready: ready_tx })
             .map_err(|e| format!("Failed to send start command: {}", e))?;
-        Ok(())
+
+        // Wait for confirmation that stream is playing
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .map_err(|_| "Timeout waiting for audio stream to start".to_string())?
+    }
+
+    /// Wait until audio data is actually arriving in the buffer.
+    pub fn wait_for_data(&self, timeout: std::time::Duration) {
+        let start = std::time::Instant::now();
+        while start.elapsed() < timeout {
+            if !self.buffer.lock().unwrap().is_empty() {
+                return;
+            }
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 
     pub fn stop(&self) -> Vec<f32> {
