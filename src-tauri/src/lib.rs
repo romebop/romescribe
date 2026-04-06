@@ -43,7 +43,7 @@ fn check_accessibility() {
         let key = CFStringCreateWithCString(
             std::ptr::null(),
             b"AXTrustedCheckOptionPrompt\0".as_ptr(),
-            0x08000100, // kCFStringEncodingUTF8
+            0x08000100,
         );
         let dict = CFDictionaryCreate(
             std::ptr::null(),
@@ -53,7 +53,13 @@ fn check_accessibility() {
             std::ptr::null(),
             std::ptr::null(),
         );
-        AXIsProcessTrustedWithOptions(dict);
+        let trusted = AXIsProcessTrustedWithOptions(dict);
+        if !trusted {
+            println!("[romescribe] Accessibility not enabled — opening Settings...");
+            let _ = std::process::Command::new("open")
+                .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+                .spawn();
+        }
     }
 }
 
