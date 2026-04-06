@@ -21,6 +21,42 @@ use transcribe::Transcriber;
 
 const KVK_ANSI_V: CGKeyCode = 0x09;
 
+fn check_accessibility() {
+    extern "C" {
+        fn AXIsProcessTrustedWithOptions(options: *const std::ffi::c_void) -> bool;
+        fn CFDictionaryCreate(
+            alloc: *const std::ffi::c_void,
+            keys: *const *const std::ffi::c_void,
+            vals: *const *const std::ffi::c_void,
+            n: i64,
+            kc: *const std::ffi::c_void,
+            vc: *const std::ffi::c_void,
+        ) -> *const std::ffi::c_void;
+        fn CFStringCreateWithCString(
+            alloc: *const std::ffi::c_void,
+            s: *const u8,
+            enc: u32,
+        ) -> *const std::ffi::c_void;
+        static kCFBooleanTrue: *const std::ffi::c_void;
+    }
+    unsafe {
+        let key = CFStringCreateWithCString(
+            std::ptr::null(),
+            b"AXTrustedCheckOptionPrompt\0".as_ptr(),
+            0x08000100, // kCFStringEncodingUTF8
+        );
+        let dict = CFDictionaryCreate(
+            std::ptr::null(),
+            &key,
+            &kCFBooleanTrue,
+            1,
+            std::ptr::null(),
+            std::ptr::null(),
+        );
+        AXIsProcessTrustedWithOptions(dict);
+    }
+}
+
 /// Simulate Cmd+V via CGEvent (direct C API, no subprocess).
 fn simulate_paste() -> Result<(), String> {
     let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
@@ -549,6 +585,8 @@ pub fn run() {
         .setup(|app| {
             // Hide from Dock — run as menu bar only app
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            check_accessibility();
 
             let settings = settings::load_settings();
             println!(
