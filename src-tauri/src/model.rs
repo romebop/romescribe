@@ -34,7 +34,7 @@ pub const MODELS: &[ModelInfo] = &[
         filename: "ggml-small.en.bin",
         url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin",
         size_bytes: 487_601_967,
-        description: "Recommended — best accuracy/speed tradeoff",
+        description: "Recommended — best accuracy vs speed tradeoff",
     },
     ModelInfo {
         id: "medium.en",

@@ -9,12 +9,29 @@
   <body>
     <div id="settings-view">
       <div class="settings-section">
+        <h2>Microphone</h2>
+        <select id="mic-select" class="mic-select"></select>
+      </div>
+
+      <div class="settings-section">
         <h2>Hotkey</h2>
         <div class="hotkey-row">
           <input type="text" id="hotkey-input" class="hotkey-input" readonly placeholder="Press keys..." />
           <button id="hotkey-save" class="btn-save">Save</button>
         </div>
-        <p class="hotkey-hint">Click the field, press your desired key combination, then click Save</p>
+      </div>
+
+      <div class="settings-section">
+        <h2>Clipboard</h2>
+        <div class="toggle-row">
+          <div>
+            <span class="toggle-label">Save transcription to clipboard</span>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" id="clipboard-toggle" />
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
       </div>
 
       <div class="settings-section">

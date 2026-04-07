@@ -321,6 +321,29 @@ fn set_hotkey(hotkey: String, state: State<'_, AppState>, app: AppHandle) -> Res
     Ok(())
 }
 
+#[tauri::command]
+fn set_copy_to_clipboard(copy_to_clipboard: bool, state: State<'_, AppState>) -> Result<(), String> {
+    let mut settings = state.settings.lock().unwrap();
+    settings.copy_to_clipboard = copy_to_clipboard;
+    settings::save_settings(&settings)
+}
+
+#[tauri::command]
+fn get_audio_devices() -> Vec<String> {
+    audio::list_input_devices()
+}
+
+#[tauri::command]
+fn set_audio_device(device: String, state: State<'_, AppState>) -> Result<(), String> {
+    if state.is_recording.load(Ordering::SeqCst) {
+        return Err("Cannot change audio device while recording".to_string());
+    }
+    state.recorder.set_device(&device)?;
+    let mut settings = state.settings.lock().unwrap();
+    settings.audio_device = device;
+    settings::save_settings(&settings)
+}
+
 #[derive(Clone, serde::Serialize)]
 struct DownloadProgress {
     model_id: String,
@@ -489,6 +512,15 @@ fn do_toggle_inner(state: &AppState, app: &AppHandle) -> Result<Option<String>, 
             return Err("No audio recorded".to_string());
         }
 
+        // Check audio energy — Whisper hallucinates on near-silence
+        let rms = (audio.iter().map(|s| (*s as f64) * (*s as f64)).sum::<f64>() / audio.len() as f64).sqrt();
+        add_log(state, &format!("Audio RMS energy: {:.6}", rms));
+        if rms < 0.001 {
+            add_log(state, "Audio too quiet — skipping transcription");
+            let _ = app.emit("error", "No speech detected (audio too quiet)");
+            return Err("No speech detected".to_string());
+        }
+
         let _ = app.emit("transcribing", ());
 
         add_log(state, "Transcribing...");
@@ -516,8 +548,21 @@ fn do_toggle_inner(state: &AppState, app: &AppHandle) -> Result<Option<String>, 
         }
 
         // Insert text directly into focused field
+        let copy_to_clipboard = state.settings.lock().unwrap().copy_to_clipboard;
         std::thread::sleep(std::time::Duration::from_millis(50));
-        if let Err(e) = insert_text(app, &text) {
+        if copy_to_clipboard {
+            // Write to clipboard and paste, but don't restore old clipboard contents
+            let saved = app.clipboard().read_text().unwrap_or_default();
+            app.clipboard().write_text(&text).ok();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            if let Err(e) = simulate_paste() {
+                add_log(state, &format!("Insert failed: {}", e));
+                // Restore on failure
+                let _ = app.clipboard().write_text(&saved);
+            } else {
+                add_log(state, "Text inserted (clipboard retained)");
+            }
+        } else if let Err(e) = insert_text(app, &text) {
             add_log(state, &format!("Insert failed: {}", e));
         } else {
             add_log(state, "Text inserted");
@@ -724,7 +769,7 @@ pub fn run() {
             let menu = Menu::with_items(app, &[&settings_item, &logs_item, &sep, &quit_item])?;
 
             app.manage(AppState {
-                recorder: AudioRecorder::new(),
+                recorder: AudioRecorder::new(&settings.audio_device),
                 transcriber: Mutex::new(transcriber),
                 is_recording: AtomicBool::new(false),
                 settings: Mutex::new(settings),
@@ -781,6 +826,9 @@ pub fn run() {
             select_model,
             set_use_gpu,
             set_hotkey,
+            set_copy_to_clipboard,
+            get_audio_devices,
+            set_audio_device,
             download_model,
             cancel_download,
             get_logs,

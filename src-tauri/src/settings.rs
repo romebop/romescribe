@@ -7,6 +7,10 @@ pub struct Settings {
     pub use_gpu: bool,
     #[serde(default = "default_hotkey")]
     pub hotkey: String,
+    #[serde(default)]
+    pub copy_to_clipboard: bool,
+    #[serde(default)]
+    pub audio_device: String,
 }
 
 fn default_hotkey() -> String {
@@ -19,6 +23,8 @@ impl Default for Settings {
             selected_model: "small.en".to_string(),
             use_gpu: true,
             hotkey: default_hotkey(),
+            copy_to_clipboard: false,
+            audio_device: String::new(),
         }
     }
 }

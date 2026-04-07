@@ -6,6 +6,8 @@ const logsView = document.getElementById("logs-view")!;
 const logsContent = document.getElementById("logs-content")!;
 const modelList = document.getElementById("model-list")!;
 const gpuToggle = document.getElementById("gpu-toggle")! as HTMLInputElement;
+const clipboardToggle = document.getElementById("clipboard-toggle")! as HTMLInputElement;
+const micSelect = document.getElementById("mic-select")! as HTMLSelectElement;
 const hotkeyInput = document.getElementById("hotkey-input")! as HTMLInputElement;
 const hotkeySave = document.getElementById("hotkey-save")!;
 
@@ -23,6 +25,8 @@ interface Settings {
   selected_model: string;
   use_gpu: boolean;
   hotkey: string;
+  copy_to_clipboard: boolean;
+  audio_device: string;
 }
 
 interface DownloadProgress {
@@ -64,12 +68,29 @@ function formatBytes(bytes: number): string {
 
 // --- Settings ---
 async function loadSettings() {
-  const [settings, models] = await Promise.all([
+  const [settings, models, devices] = await Promise.all([
     invoke<Settings>("get_settings"),
     invoke<ModelEntry[]>("get_models"),
+    invoke<string[]>("get_audio_devices"),
   ]);
 
   gpuToggle.checked = settings.use_gpu;
+  clipboardToggle.checked = settings.copy_to_clipboard;
+
+  // Populate mic dropdown
+  micSelect.innerHTML = "";
+  const defaultOpt = document.createElement("option");
+  defaultOpt.value = "";
+  defaultOpt.textContent = "System Default";
+  micSelect.appendChild(defaultOpt);
+  for (const name of devices) {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = name;
+    micSelect.appendChild(opt);
+  }
+  micSelect.value = settings.audio_device;
+
   currentHotkey = settings.hotkey;
   pendingHotkey = settings.hotkey;
   hotkeyInput.value = formatHotkeyDisplay(settings.hotkey);
@@ -149,6 +170,32 @@ modelList.addEventListener("click", async (e) => {
   } else if (action === "cancel") {
     await invoke("cancel_download");
   }
+});
+
+// --- Microphone Select ---
+micSelect.addEventListener("change", async () => {
+  const device = micSelect.value;
+  micSelect.disabled = true;
+  try {
+    await invoke("set_audio_device", { device });
+  } catch (err) {
+    alert(`Failed to change audio device: ${err}`);
+    loadSettings();
+  }
+  micSelect.disabled = false;
+});
+
+// --- Clipboard Toggle ---
+clipboardToggle.addEventListener("change", async () => {
+  const copyToClipboard = clipboardToggle.checked;
+  clipboardToggle.disabled = true;
+  try {
+    await invoke("set_copy_to_clipboard", { copyToClipboard });
+  } catch (err) {
+    clipboardToggle.checked = !copyToClipboard;
+    alert(`Failed to change clipboard setting: ${err}`);
+  }
+  clipboardToggle.disabled = false;
 });
 
 // --- GPU Toggle ---
