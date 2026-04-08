@@ -8,7 +8,7 @@ use std::thread;
 
 enum AudioCommand {
     Start { ready: mpsc::Sender<Result<(), String>> },
-    Stop,
+    Stop { done: mpsc::Sender<()> },
     SetDevice { name: String, done: mpsc::Sender<Result<(), String>> },
 }
 
@@ -119,7 +119,6 @@ fn build_stream(
 /// captured to the buffer.
 pub struct AudioRecorder {
     buffer: Arc<Mutex<Vec<f32>>>,
-    recording: Arc<AtomicBool>,
     sender: Mutex<mpsc::Sender<AudioCommand>>,
     sample_rate: Arc<Mutex<u32>>,
 }
@@ -178,7 +177,6 @@ impl AudioRecorder {
                     }
                     AudioCommand::Start { ready } => {
                         buf.lock().unwrap().clear();
-                        // Unpause the stream — callbacks start firing
                         if let Err(e) = stream.play() {
                             let _ = ready.send(Err(format!("Failed to start stream: {}", e)));
                             continue;
@@ -186,11 +184,12 @@ impl AudioRecorder {
                         rec.store(true, Ordering::SeqCst);
                         let _ = ready.send(Ok(()));
                     }
-                    AudioCommand::Stop => {
+                    AudioCommand::Stop { done } => {
                         rec.store(false, Ordering::SeqCst);
-                        // Pause the stream — no more callbacks, but device
-                        // connection stays alive for quick restart
                         let _ = stream.pause();
+                        // Let pending audio callbacks flush
+                        thread::sleep(std::time::Duration::from_millis(50));
+                        let _ = done.send(());
                     }
                 }
             }
@@ -198,7 +197,6 @@ impl AudioRecorder {
 
         Self {
             buffer,
-            recording,
             sender: Mutex::new(tx),
             sample_rate,
         }
@@ -234,23 +232,11 @@ impl AudioRecorder {
             .map_err(|_| "Timeout waiting for audio stream to start".to_string())?
     }
 
-    /// Wait until audio data is actually arriving in the buffer.
-    pub fn wait_for_data(&self, timeout: std::time::Duration) {
-        let start = std::time::Instant::now();
-        while start.elapsed() < timeout {
-            if !self.buffer.lock().unwrap().is_empty() {
-                return;
-            }
-            thread::sleep(std::time::Duration::from_millis(5));
-        }
-    }
-
     pub fn stop(&self) -> Vec<f32> {
-        // Send stop command to pause the stream
-        let _ = self.sender.lock().unwrap().send(AudioCommand::Stop);
-
-        // Brief wait for the pause to take effect
-        thread::sleep(std::time::Duration::from_millis(50));
+        let (done_tx, done_rx) = mpsc::channel();
+        let _ = self.sender.lock().unwrap().send(AudioCommand::Stop { done: done_tx });
+        // Wait for audio thread to pause stream and flush pending callbacks
+        let _ = done_rx.recv_timeout(std::time::Duration::from_secs(2));
 
         let samples = self.buffer.lock().unwrap().clone();
         let rate = *self.sample_rate.lock().unwrap();

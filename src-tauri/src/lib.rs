@@ -21,9 +21,29 @@ use transcribe::Transcriber;
 
 const KVK_ANSI_V: CGKeyCode = 0x09;
 
-fn check_accessibility() {
+/// Show the main window and navigate to a view.
+fn show_window(app: &AppHandle, view: &str) {
+    let _ = app.emit("navigate", view);
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+fn is_accessibility_granted() -> bool {
+    extern "C" {
+        fn AXIsProcessTrusted() -> bool;
+    }
+    unsafe { AXIsProcessTrusted() }
+}
+
+fn check_accessibility() -> bool {
     extern "C" {
         fn AXIsProcessTrustedWithOptions(options: *const std::ffi::c_void) -> bool;
+        static kAXTrustedCheckOptionPrompt: *const std::ffi::c_void;
+        static kCFTypeDictionaryKeyCallBacks: std::ffi::c_void;
+        static kCFTypeDictionaryValueCallBacks: std::ffi::c_void;
+        static kCFBooleanTrue: *const std::ffi::c_void;
         fn CFDictionaryCreate(
             alloc: *const std::ffi::c_void,
             keys: *const *const std::ffi::c_void,
@@ -32,34 +52,23 @@ fn check_accessibility() {
             kc: *const std::ffi::c_void,
             vc: *const std::ffi::c_void,
         ) -> *const std::ffi::c_void;
-        fn CFStringCreateWithCString(
-            alloc: *const std::ffi::c_void,
-            s: *const u8,
-            enc: u32,
-        ) -> *const std::ffi::c_void;
-        static kCFBooleanTrue: *const std::ffi::c_void;
     }
     unsafe {
-        let key = CFStringCreateWithCString(
-            std::ptr::null(),
-            b"AXTrustedCheckOptionPrompt\0".as_ptr(),
-            0x08000100,
-        );
+        let key = kAXTrustedCheckOptionPrompt;
+        let val = kCFBooleanTrue;
         let dict = CFDictionaryCreate(
             std::ptr::null(),
             &key,
-            &kCFBooleanTrue,
+            &val,
             1,
-            std::ptr::null(),
-            std::ptr::null(),
+            &kCFTypeDictionaryKeyCallBacks as *const _ as *const std::ffi::c_void,
+            &kCFTypeDictionaryValueCallBacks as *const _ as *const std::ffi::c_void,
         );
         let trusted = AXIsProcessTrustedWithOptions(dict);
         if !trusted {
-            println!("[romescribe] Accessibility not enabled — opening Settings...");
-            let _ = std::process::Command::new("open")
-                .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-                .spawn();
+            println!("[romescribe] Accessibility not enabled — prompt shown");
         }
+        trusted
     }
 }
 
@@ -183,6 +192,8 @@ struct AppState {
     cancel_download: AtomicBool,
     current_shortcut: Mutex<Option<Shortcut>>,
     record_start_time: Mutex<Option<std::time::Instant>>,
+    recording_began: Mutex<Option<std::time::Instant>>,
+    toggle_lock: Mutex<()>,
     logs: Mutex<Vec<String>>,
 }
 
@@ -496,12 +507,30 @@ fn play_sound(name: &str) {
 }
 
 fn do_toggle_inner(state: &AppState, app: &AppHandle) -> Result<Option<String>, String> {
+    let _guard = state.toggle_lock.lock().unwrap();
+
     if state.is_recording.load(Ordering::SeqCst) {
         play_sound("Pop");
         add_log(state, "Stopping recording...");
+
+        // Ensure minimum recording duration for reliable transcription
+        if let Some(began) = *state.recording_began.lock().unwrap() {
+            let min_duration = std::time::Duration::from_millis(750);
+            let elapsed = began.elapsed();
+            if elapsed < min_duration {
+                std::thread::sleep(min_duration - elapsed);
+            }
+        }
         state.is_recording.store(false, Ordering::SeqCst);
         set_tray_recording(app, false);
         let _ = app.emit("recording-stopped", ());
+
+        // Unregister Escape so it doesn't interfere with other apps
+        let escape = Shortcut::new(None, Code::Escape);
+        match app.global_shortcut().unregister(escape) {
+            Ok(_) => println!("[romescribe] Escape shortcut unregistered"),
+            Err(e) => eprintln!("[romescribe] Failed to unregister Escape shortcut: {}", e),
+        }
 
         let audio = state.recorder.stop();
         add_log(state, &format!("Got {} audio samples", audio.len()));
@@ -520,6 +549,16 @@ fn do_toggle_inner(state: &AppState, app: &AppHandle) -> Result<Option<String>, 
             let _ = app.emit("error", "No speech detected (audio too quiet)");
             return Err("No speech detected".to_string());
         }
+
+        // Pad short audio with silence — Whisper struggles with short clips
+        let min_samples = 24000; // 1.5 seconds at 16kHz
+        let audio = if audio.len() < min_samples {
+            let mut padded = audio;
+            padded.resize(min_samples, 0.0);
+            padded
+        } else {
+            audio
+        };
 
         let _ = app.emit("transcribing", ());
 
@@ -573,15 +612,49 @@ fn do_toggle_inner(state: &AppState, app: &AppHandle) -> Result<Option<String>, 
         Ok(Some(text))
     } else {
         state.recorder.start()?;
-        // Wait until audio data is actually flowing before signaling the user
-        state.recorder.wait_for_data(std::time::Duration::from_millis(500));
+        *state.recording_began.lock().unwrap() = Some(std::time::Instant::now());
         state.is_recording.store(true, Ordering::SeqCst);
         set_tray_recording(app, true);
         let _ = app.emit("recording-started", ());
-        play_sound("Tink");
         add_log(state, "Recording started");
+
+        // Register Escape globally only while recording
+        let escape = Shortcut::new(None, Code::Escape);
+        match app.global_shortcut().register(escape) {
+            Ok(_) => println!("[romescribe] Escape shortcut registered"),
+            Err(e) => eprintln!("[romescribe] Failed to register Escape shortcut: {}", e),
+        }
         Ok(None)
     }
+}
+
+fn do_cancel(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    if !state.is_recording.load(Ordering::SeqCst) {
+        return;
+    }
+    let app_clone = app.clone();
+    std::thread::spawn(move || {
+        let state = app_clone.state::<AppState>();
+        let _guard = state.toggle_lock.lock().unwrap();
+        if !state.is_recording.load(Ordering::SeqCst) {
+            return;
+        }
+        add_log(state.inner(), "Recording cancelled");
+        state.is_recording.store(false, Ordering::SeqCst);
+        set_tray_recording(&app_clone, false);
+        let _ = app_clone.emit("recording-stopped", ());
+
+        // Unregister Escape so it doesn't interfere with other apps
+        let escape = Shortcut::new(None, Code::Escape);
+        match app_clone.global_shortcut().unregister(escape) {
+            Ok(_) => println!("[romescribe] Escape shortcut unregistered (cancel)"),
+            Err(e) => eprintln!("[romescribe] Failed to unregister Escape shortcut: {}", e),
+        }
+
+        // Discard the audio
+        state.recorder.stop();
+    });
 }
 
 fn do_toggle(app: &AppHandle) {
@@ -604,7 +677,15 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(move |app, _shortcut, event| {
+                .with_handler(move |app, shortcut, event| {
+                    let escape = Shortcut::new(None, Code::Escape);
+                    if shortcut == &escape {
+                        if event.state() == ShortcutState::Pressed {
+                            do_cancel(app);
+                        }
+                        return;
+                    }
+
                     let state = app.state::<AppState>();
                     match event.state() {
                         ShortcutState::Pressed => {
@@ -615,6 +696,7 @@ pub fn run() {
                             } else {
                                 // Start recording, note the time for hold detection
                                 *state.record_start_time.lock().unwrap() = Some(std::time::Instant::now());
+                                play_sound("Tink");
                                 do_toggle(app);
                             }
                         }
@@ -637,7 +719,7 @@ pub fn run() {
             // Hide from Dock — run as menu bar only app
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            check_accessibility();
+            let accessibility_granted = check_accessibility();
 
             let settings = settings::load_settings();
             println!(
@@ -756,10 +838,32 @@ pub fn run() {
                 Shortcut::new(Some(Modifiers::META | Modifiers::SHIFT), Code::KeyR)
             });
 
-            app.global_shortcut().register(shortcut.clone()).map_err(|e| {
-                eprintln!("[romescribe] Failed to register global shortcut: {}", e);
-                e
-            })?;
+            if accessibility_granted {
+                app.global_shortcut().register(shortcut.clone()).map_err(|e| {
+                    eprintln!("[romescribe] Failed to register global shortcut: {}", e);
+                    e
+                })?;
+
+                // Escape shortcut is registered dynamically only while recording
+            } else {
+                eprintln!("[romescribe] Skipping shortcut registration — waiting for accessibility...");
+                let app_handle = app.handle().clone();
+                let shortcut_clone = shortcut.clone();
+                std::thread::spawn(move || {
+                    // Poll until accessibility is granted
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                        if is_accessibility_granted() {
+                            println!("[romescribe] Accessibility granted — registering shortcuts");
+                            if let Err(e) = app_handle.global_shortcut().register(shortcut_clone) {
+                                eprintln!("[romescribe] Failed to register hotkey: {}", e);
+                            }
+                            // Escape shortcut is registered dynamically only while recording
+                            break;
+                        }
+                    }
+                });
+            }
 
             // System tray
             let settings_item = MenuItem::with_id(app, "settings", "Settings...", true, None::<&str>)?;
@@ -777,6 +881,8 @@ pub fn run() {
                 cancel_download: AtomicBool::new(false),
                 current_shortcut: Mutex::new(Some(shortcut)),
                 record_start_time: Mutex::new(None),
+                recording_began: Mutex::new(None),
+                toggle_lock: Mutex::new(()),
                 logs: Mutex::new(Vec::new()),
             });
 
@@ -787,18 +893,10 @@ pub fn run() {
                 .on_menu_event(move |app, event| {
                     match event.id().as_ref() {
                         "settings" => {
-                            let _ = app.emit("navigate", "settings");
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
+                            show_window(app, "settings");
                         }
                         "logs" => {
-                            let _ = app.emit("navigate", "logs");
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
+                            show_window(app, "logs");
                         }
                         "quit" => {
                             app.exit(0);
@@ -812,7 +910,6 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // Don't close — just hide the window
                 api.prevent_close();
                 let _ = window.hide();
             }

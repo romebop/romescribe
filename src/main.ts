@@ -223,7 +223,6 @@ hotkeyInput.addEventListener("keydown", (e) => {
   const code = e.code;
   if (["MetaLeft", "MetaRight", "ControlLeft", "ControlRight",
        "AltLeft", "AltRight", "ShiftLeft", "ShiftRight"].includes(code)) return;
-  if (modifiers.length === 0) return;
 
   let keyName: string;
   if (code === "Space") keyName = "Space";
@@ -292,8 +291,7 @@ listen<string>("download-error", (event) => {
   console.error("Download error:", event.payload);
 });
 
-listen<string>("navigate", (event) => {
-  const view = event.payload;
+function navigateTo(view: string) {
   if (view === "settings") {
     settingsView.classList.remove("hidden");
     logsView.classList.add("hidden");
@@ -303,7 +301,12 @@ listen<string>("navigate", (event) => {
     logsView.classList.remove("hidden");
     loadLogs();
   }
+}
+
+listen<string>("navigate", (event) => {
+  navigateTo(event.payload);
 });
+
 
 // --- Logs ---
 async function loadLogs() {
