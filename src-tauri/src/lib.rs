@@ -15,6 +15,7 @@ use tauri::{
 };
 use core_graphics::event::{CGEvent, CGEventFlags, CGKeyCode};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+use std::sync::mpsc as std_mpsc;
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 use transcribe::Transcriber;
@@ -672,6 +673,63 @@ fn do_toggle(app: &AppHandle) {
 // --- App Setup ---
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+// --- macOS sleep/wake detection via IOKit ---
+
+struct PowerContext {
+    wake_sender: std_mpsc::Sender<()>,
+    root_port: u32,
+}
+
+#[link(name = "IOKit", kind = "framework")]
+extern "C" {
+    fn IORegisterForSystemPower(
+        refcon: *mut std::ffi::c_void,
+        port_ref: *mut *mut std::ffi::c_void,
+        callback: extern "C" fn(
+            refcon: *mut std::ffi::c_void,
+            service: u32,
+            message_type: u32,
+            message_argument: *mut std::ffi::c_void,
+        ),
+        notifier: *mut u32,
+    ) -> u32;
+    fn IONotificationPortGetRunLoopSource(notify: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+    fn IOAllowPowerChange(kernel_port: u32, notification_id: isize);
+    fn CFRunLoopGetCurrent() -> *mut std::ffi::c_void;
+    fn CFRunLoopAddSource(
+        rl: *mut std::ffi::c_void,
+        source: *mut std::ffi::c_void,
+        mode: *const std::ffi::c_void,
+    );
+    fn CFRunLoopRun();
+}
+
+extern "C" {
+    static kCFRunLoopDefaultMode: *const std::ffi::c_void;
+}
+
+const KIO_MESSAGE_SYSTEM_HAS_POWERED_ON: u32 = 0xe000_0300;
+const KIO_MESSAGE_CAN_SYSTEM_SLEEP: u32 = 0xe000_0240;
+const KIO_MESSAGE_SYSTEM_WILL_SLEEP: u32 = 0xe000_0280;
+
+extern "C" fn power_callback(
+    refcon: *mut std::ffi::c_void,
+    _service: u32,
+    message_type: u32,
+    message_argument: *mut std::ffi::c_void,
+) {
+    let ctx = unsafe { &*(refcon as *const PowerContext) };
+    match message_type {
+        KIO_MESSAGE_SYSTEM_HAS_POWERED_ON => {
+            let _ = ctx.wake_sender.send(());
+        }
+        KIO_MESSAGE_CAN_SYSTEM_SLEEP | KIO_MESSAGE_SYSTEM_WILL_SLEEP => {
+            unsafe { IOAllowPowerChange(ctx.root_port, message_argument as isize) };
+        }
+        _ => {}
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -905,6 +963,48 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+
+            // Listen for macOS sleep/wake to rebuild audio stream
+            let (wake_tx, wake_rx) = std_mpsc::channel::<()>();
+            std::thread::spawn(move || {
+                unsafe {
+                    let ctx = Box::into_raw(Box::new(PowerContext {
+                        wake_sender: wake_tx,
+                        root_port: 0,
+                    }));
+                    let mut port: *mut std::ffi::c_void = std::ptr::null_mut();
+                    let mut notifier: u32 = 0;
+                    let root_port = IORegisterForSystemPower(
+                        ctx as *mut std::ffi::c_void,
+                        &mut port,
+                        power_callback,
+                        &mut notifier,
+                    );
+                    if root_port == 0 {
+                        eprintln!("[romescribe] Failed to register for power notifications");
+                        drop(Box::from_raw(ctx));
+                        return;
+                    }
+                    (*ctx).root_port = root_port;
+                    let source = IONotificationPortGetRunLoopSource(port);
+                    let rl = CFRunLoopGetCurrent();
+                    CFRunLoopAddSource(rl, source, kCFRunLoopDefaultMode);
+                    CFRunLoopRun();
+                }
+            });
+
+            let app_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                while wake_rx.recv().is_ok() {
+                    println!("[romescribe] System wake detected — rebuilding audio stream in 1s");
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    let state = app_handle.state::<AppState>();
+                    match state.recorder.rebuild() {
+                        Ok(()) => println!("[romescribe] Audio stream rebuilt after wake"),
+                        Err(e) => eprintln!("[romescribe] Failed to rebuild audio after wake: {}", e),
+                    }
+                }
+            });
 
             Ok(())
         })

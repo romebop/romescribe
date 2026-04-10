@@ -10,6 +10,7 @@ enum AudioCommand {
     Start { ready: mpsc::Sender<Result<(), String>> },
     Stop { done: mpsc::Sender<()> },
     SetDevice { name: String, done: mpsc::Sender<Result<(), String>> },
+    Rebuild { done: mpsc::Sender<Result<(), String>> },
 }
 
 /// Returns names of all available audio input devices.
@@ -156,6 +157,8 @@ impl AudioRecorder {
                 }
             };
 
+            let mut current_device_name = initial_device_name;
+
             while let Ok(cmd) = rx.recv() {
                 match cmd {
                     AudioCommand::SetDevice { name, done } => {
@@ -164,6 +167,24 @@ impl AudioRecorder {
                             Some(d) => match build_stream(&d, &buf, &rate) {
                                 Ok(s) => {
                                     stream = s;
+                                    current_device_name = name;
+                                    let _ = done.send(Ok(()));
+                                }
+                                Err(e) => {
+                                    let _ = done.send(Err(e));
+                                }
+                            },
+                            None => {
+                                let _ = done.send(Err("Device not found".to_string()));
+                            }
+                        }
+                    }
+                    AudioCommand::Rebuild { done } => {
+                        match find_device(&current_device_name) {
+                            Some(d) => match build_stream(&d, &buf, &rate) {
+                                Ok(s) => {
+                                    stream = s;
+                                    println!("[romescribe] Audio stream rebuilt successfully");
                                     let _ = done.send(Ok(()));
                                 }
                                 Err(e) => {
@@ -216,6 +237,19 @@ impl AudioRecorder {
         done_rx
             .recv_timeout(std::time::Duration::from_secs(5))
             .map_err(|_| "Timeout waiting for device switch".to_string())?
+    }
+
+    /// Rebuild the audio stream on the current device (e.g. after system wake).
+    pub fn rebuild(&self) -> Result<(), String> {
+        let (done_tx, done_rx) = mpsc::channel();
+        self.sender
+            .lock()
+            .unwrap()
+            .send(AudioCommand::Rebuild { done: done_tx })
+            .map_err(|e| format!("Failed to send rebuild command: {}", e))?;
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(|_| "Timeout waiting for stream rebuild".to_string())?
     }
 
     /// Starts recording. Blocks until the audio stream is confirmed running.
