@@ -730,6 +730,115 @@ extern "C" fn power_callback(
     }
 }
 
+// --- macOS display wake detection via NSWorkspace ---
+
+static DISPLAY_WAKE_SENDER: std::sync::OnceLock<std_mpsc::Sender<()>> = std::sync::OnceLock::new();
+
+type ObjcId = *mut std::ffi::c_void;
+type ObjcSel = *const std::ffi::c_void;
+type ObjcClass = *mut std::ffi::c_void;
+
+#[link(name = "objc")]
+extern "C" {
+    fn objc_getClass(name: *const std::os::raw::c_char) -> ObjcClass;
+    fn objc_allocateClassPair(
+        superclass: ObjcClass,
+        name: *const std::os::raw::c_char,
+        extra_bytes: usize,
+    ) -> ObjcClass;
+    fn objc_registerClassPair(cls: ObjcClass);
+    fn class_addMethod(
+        cls: ObjcClass,
+        sel: ObjcSel,
+        imp: *const std::ffi::c_void,
+        types: *const std::os::raw::c_char,
+    ) -> bool;
+    fn sel_registerName(name: *const std::os::raw::c_char) -> ObjcSel;
+    fn objc_msgSend();
+}
+
+#[link(name = "AppKit", kind = "framework")]
+extern "C" {
+    static NSWorkspaceScreensDidWakeNotification: ObjcId;
+}
+
+extern "C" fn handle_display_wake(_self: ObjcId, _cmd: ObjcSel, _notif: ObjcId) {
+    println!("[romescribe] Display wake notification received");
+    if let Some(tx) = DISPLAY_WAKE_SENDER.get() {
+        let _ = tx.send(());
+    }
+}
+
+unsafe fn register_display_wake_observer() {
+    unsafe fn msg_send_0(receiver: ObjcId, sel: ObjcSel) -> ObjcId {
+        let f: extern "C" fn(ObjcId, ObjcSel) -> ObjcId =
+            std::mem::transmute(objc_msgSend as *const ());
+        f(receiver, sel)
+    }
+    unsafe fn msg_send_add_observer(
+        center: ObjcId,
+        sel: ObjcSel,
+        observer: ObjcId,
+        selector: ObjcSel,
+        name: ObjcId,
+        object: ObjcId,
+    ) {
+        let f: extern "C" fn(ObjcId, ObjcSel, ObjcId, ObjcSel, ObjcId, ObjcId) =
+            std::mem::transmute(objc_msgSend as *const ());
+        f(center, sel, observer, selector, name, object);
+    }
+
+    let nsobject = objc_getClass(c"NSObject".as_ptr());
+    if nsobject.is_null() {
+        eprintln!("[romescribe] Failed to find NSObject class");
+        return;
+    }
+    let cls = objc_allocateClassPair(nsobject, c"RomescribeDisplayObserver".as_ptr(), 0);
+    if cls.is_null() {
+        eprintln!("[romescribe] Failed to allocate display observer class");
+        return;
+    }
+    let sel_handle = sel_registerName(c"handleDisplayWake:".as_ptr());
+    let ok = class_addMethod(
+        cls,
+        sel_handle,
+        handle_display_wake as *const std::ffi::c_void,
+        c"v@:@".as_ptr(),
+    );
+    if !ok {
+        eprintln!("[romescribe] Failed to add method to display observer class");
+        return;
+    }
+    objc_registerClassPair(cls);
+
+    let alloc_sel = sel_registerName(c"alloc".as_ptr());
+    let init_sel = sel_registerName(c"init".as_ptr());
+    let instance = msg_send_0(msg_send_0(cls, alloc_sel), init_sel);
+    if instance.is_null() {
+        eprintln!("[romescribe] Failed to create display observer instance");
+        return;
+    }
+
+    let nsworkspace = objc_getClass(c"NSWorkspace".as_ptr());
+    let shared_sel = sel_registerName(c"sharedWorkspace".as_ptr());
+    let workspace = msg_send_0(nsworkspace, shared_sel);
+
+    let center_sel = sel_registerName(c"notificationCenter".as_ptr());
+    let center = msg_send_0(workspace, center_sel);
+
+    let add_sel = sel_registerName(c"addObserver:selector:name:object:".as_ptr());
+    msg_send_add_observer(
+        center,
+        add_sel,
+        instance,
+        sel_handle,
+        NSWorkspaceScreensDidWakeNotification,
+        std::ptr::null_mut(),
+    );
+
+    println!("[romescribe] Display wake observer registered");
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -966,6 +1075,11 @@ pub fn run() {
 
             // Listen for macOS sleep/wake to rebuild audio stream
             let (wake_tx, wake_rx) = std_mpsc::channel::<()>();
+
+            // Register NSWorkspace display wake observer (fires on screen-only sleep/wake)
+            let _ = DISPLAY_WAKE_SENDER.set(wake_tx.clone());
+            unsafe { register_display_wake_observer(); }
+
             std::thread::spawn(move || {
                 unsafe {
                     let ctx = Box::into_raw(Box::new(PowerContext {

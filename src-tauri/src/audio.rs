@@ -40,10 +40,13 @@ fn find_device(name: &str) -> Option<Device> {
 
 /// Build a cpal input stream that pushes mono f32 samples into `buf`.
 /// The stream is created in a paused state — call stream.play() to start.
+/// `cmd_tx` is cloned into the stream's error callback so CoreAudio errors
+/// (device died, disconnected, etc.) trigger a rebuild.
 fn build_stream(
     device: &Device,
     buf: &Arc<Mutex<Vec<f32>>>,
     rate: &Arc<Mutex<u32>>,
+    cmd_tx: &mpsc::Sender<AudioCommand>,
 ) -> Result<cpal::Stream, String> {
     let config = device
         .default_input_config()
@@ -61,7 +64,13 @@ fn build_stream(
         channels
     );
 
-    let err_fn = |err| eprintln!("[romescribe] Audio stream error: {}", err);
+    let err_tx = cmd_tx.clone();
+    let err_fn = move |err: cpal::StreamError| {
+        eprintln!("[romescribe] Audio stream error: {}", err);
+        // Fire-and-forget rebuild; dummy done channel we never read.
+        let (done_tx, _) = mpsc::channel();
+        let _ = err_tx.send(AudioCommand::Rebuild { done: done_tx });
+    };
 
     let stream: cpal::Stream = match sample_format {
         SampleFormat::F32 => {
@@ -133,6 +142,7 @@ impl AudioRecorder {
         let recording = Arc::new(AtomicBool::new(false));
         let sample_rate = Arc::new(Mutex::new(0u32));
         let (tx, rx) = mpsc::channel::<AudioCommand>();
+        let tx_for_thread = tx.clone();
 
         let buf = buffer.clone();
         let rec = recording.clone();
@@ -140,6 +150,7 @@ impl AudioRecorder {
         let initial_device_name = device_name.to_string();
 
         thread::spawn(move || {
+            let cmd_tx = tx_for_thread;
             // Open initial stream and keep it alive
             let device = match find_device(&initial_device_name) {
                 Some(d) => d,
@@ -149,7 +160,7 @@ impl AudioRecorder {
                 }
             };
 
-            let mut stream = match build_stream(&device, &buf, &rate) {
+            let mut stream = match build_stream(&device, &buf, &rate, &cmd_tx) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("[romescribe] Failed to open audio stream: {}", e);
@@ -164,7 +175,7 @@ impl AudioRecorder {
                     AudioCommand::SetDevice { name, done } => {
                         // Rebuild stream on the new device
                         match find_device(&name) {
-                            Some(d) => match build_stream(&d, &buf, &rate) {
+                            Some(d) => match build_stream(&d, &buf, &rate, &cmd_tx) {
                                 Ok(s) => {
                                     stream = s;
                                     current_device_name = name;
@@ -181,7 +192,7 @@ impl AudioRecorder {
                     }
                     AudioCommand::Rebuild { done } => {
                         match find_device(&current_device_name) {
-                            Some(d) => match build_stream(&d, &buf, &rate) {
+                            Some(d) => match build_stream(&d, &buf, &rate, &cmd_tx) {
                                 Ok(s) => {
                                     stream = s;
                                     println!("[romescribe] Audio stream rebuilt successfully");

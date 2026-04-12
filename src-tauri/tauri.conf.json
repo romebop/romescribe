@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicegui-org/nicegui/main/nicegui/templates/tauri_conf_schema.json",
   "productName": "romescribe",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "identifier": "com.romescribe.dev",
   "build": {
     "beforeDevCommand": "pnpm dev",

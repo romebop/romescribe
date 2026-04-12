@@ -335,4 +335,7 @@ button:disabled {
   overflow-y: auto;
   white-space: pre-wrap;
   word-wrap: break-word;
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
 }

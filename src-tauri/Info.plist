@@ -6,5 +6,7 @@
   <true/>
   <key>NSMicrophoneUsageDescription</key>
   <string>romescribe needs microphone access to record audio for transcription.</string>
+  <key>NSAppSleepDisabled</key>
+  <true/>
 </dict>
 </plist>
