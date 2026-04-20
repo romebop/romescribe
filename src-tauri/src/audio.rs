@@ -46,6 +46,7 @@ fn build_stream(
     device: &Device,
     buf: &Arc<Mutex<Vec<f32>>>,
     rate: &Arc<Mutex<u32>>,
+    peak: &Arc<Mutex<f32>>,
     cmd_tx: &mpsc::Sender<AudioCommand>,
 ) -> Result<cpal::Stream, String> {
     let config = device
@@ -75,14 +76,25 @@ fn build_stream(
     let stream: cpal::Stream = match sample_format {
         SampleFormat::F32 => {
             let buf = buf.clone();
+            let peak = peak.clone();
             device
                 .build_input_stream(
                     &stream_config,
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
                         let mut b = buf.lock().unwrap();
+                        let mut local_peak: f32 = 0.0;
                         for chunk in data.chunks(channels) {
                             let mono: f32 = chunk.iter().sum::<f32>() / channels as f32;
                             b.push(mono);
+                            let a = mono.abs();
+                            if a > local_peak {
+                                local_peak = a;
+                            }
+                        }
+                        drop(b);
+                        let mut p = peak.lock().unwrap();
+                        if local_peak > *p {
+                            *p = local_peak;
                         }
                     },
                     err_fn,
@@ -92,11 +104,13 @@ fn build_stream(
         }
         SampleFormat::I16 => {
             let buf = buf.clone();
+            let peak = peak.clone();
             device
                 .build_input_stream(
                     &stream_config,
                     move |data: &[i16], _: &cpal::InputCallbackInfo| {
                         let mut b = buf.lock().unwrap();
+                        let mut local_peak: f32 = 0.0;
                         for chunk in data.chunks(channels) {
                             let mono: f32 = chunk
                                 .iter()
@@ -104,6 +118,15 @@ fn build_stream(
                                 .sum::<f32>()
                                 / channels as f32;
                             b.push(mono);
+                            let a = mono.abs();
+                            if a > local_peak {
+                                local_peak = a;
+                            }
+                        }
+                        drop(b);
+                        let mut p = peak.lock().unwrap();
+                        if local_peak > *p {
+                            *p = local_peak;
                         }
                     },
                     err_fn,
@@ -131,6 +154,7 @@ pub struct AudioRecorder {
     buffer: Arc<Mutex<Vec<f32>>>,
     sender: Mutex<mpsc::Sender<AudioCommand>>,
     sample_rate: Arc<Mutex<u32>>,
+    latest_peak: Arc<Mutex<f32>>,
 }
 
 unsafe impl Send for AudioRecorder {}
@@ -141,12 +165,14 @@ impl AudioRecorder {
         let buffer = Arc::new(Mutex::new(Vec::new()));
         let recording = Arc::new(AtomicBool::new(false));
         let sample_rate = Arc::new(Mutex::new(0u32));
+        let latest_peak = Arc::new(Mutex::new(0.0f32));
         let (tx, rx) = mpsc::channel::<AudioCommand>();
         let tx_for_thread = tx.clone();
 
         let buf = buffer.clone();
         let rec = recording.clone();
         let rate = sample_rate.clone();
+        let peak = latest_peak.clone();
         let initial_device_name = device_name.to_string();
 
         thread::spawn(move || {
@@ -160,7 +186,7 @@ impl AudioRecorder {
                 }
             };
 
-            let mut stream = match build_stream(&device, &buf, &rate, &cmd_tx) {
+            let mut stream = match build_stream(&device, &buf, &rate, &peak, &cmd_tx) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("[romescribe] Failed to open audio stream: {}", e);
@@ -175,7 +201,7 @@ impl AudioRecorder {
                     AudioCommand::SetDevice { name, done } => {
                         // Rebuild stream on the new device
                         match find_device(&name) {
-                            Some(d) => match build_stream(&d, &buf, &rate, &cmd_tx) {
+                            Some(d) => match build_stream(&d, &buf, &rate, &peak, &cmd_tx) {
                                 Ok(s) => {
                                     stream = s;
                                     current_device_name = name;
@@ -192,7 +218,7 @@ impl AudioRecorder {
                     }
                     AudioCommand::Rebuild { done } => {
                         match find_device(&current_device_name) {
-                            Some(d) => match build_stream(&d, &buf, &rate, &cmd_tx) {
+                            Some(d) => match build_stream(&d, &buf, &rate, &peak, &cmd_tx) {
                                 Ok(s) => {
                                     stream = s;
                                     println!("[romescribe] Audio stream rebuilt successfully");
@@ -209,6 +235,7 @@ impl AudioRecorder {
                     }
                     AudioCommand::Start { ready } => {
                         buf.lock().unwrap().clear();
+                        *peak.lock().unwrap() = 0.0;
                         if let Err(e) = stream.play() {
                             let _ = ready.send(Err(format!("Failed to start stream: {}", e)));
                             continue;
@@ -231,7 +258,17 @@ impl AudioRecorder {
             buffer,
             sender: Mutex::new(tx),
             sample_rate,
+            latest_peak,
         }
+    }
+
+    /// Reads and clears the latest peak amplitude (abs mono sample) observed
+    /// since the last call. Used by the UI overlay to animate the waveform.
+    pub fn take_peak(&self) -> f32 {
+        let mut p = self.latest_peak.lock().unwrap();
+        let v = *p;
+        *p = 0.0;
+        v
     }
 
     /// Switch to a different audio input device by name. Empty string = system default.

@@ -63,9 +63,6 @@ body {
   background: #282828;
 }
 
-.model-row.active {
-  background: #1a2e1a;
-}
 
 .model-info {
   flex: 1;
@@ -100,41 +97,42 @@ body {
 }
 
 .btn-download {
-  background: #2d4a2d;
-  color: #6fcf6f;
+  background: #1e3948;
+  color: #64d2ff;
 }
 
 .btn-download:hover {
-  background: #3a5e3a;
+  background: #2a4f66;
 }
 
 .btn-select {
-  background: #2d3a4a;
-  color: #6fa8cf;
+  background: #1e3948;
+  color: #64d2ff;
 }
 
 .btn-select:hover {
-  background: #3a4d62;
+  background: #2a4f66;
 }
 
-.btn-active {
-  background: #1a3a1a;
-  color: #4caf50;
+.btn-active,
+.btn-active:disabled {
+  background: transparent;
+  color: #ffee00;
   cursor: default;
+  opacity: 1;
 }
 
 .btn-cancel {
-  background: #4a2d2d;
-  color: #cf6f6f;
+  background: #1e3948;
+  color: #64d2ff;
 }
 
 .btn-cancel:hover {
-  background: #5e3a3a;
+  background: #2a4f66;
 }
 
 button:disabled {
   opacity: 0.4;
-  cursor: not-allowed;
 }
 
 /* Progress bar */
@@ -153,7 +151,7 @@ button:disabled {
 
 .progress-fill {
   height: 100%;
-  background: #4caf50;
+  background: #ffee00;
   border-radius: 2px;
   transition: width 0.2s ease;
   width: 0%;
@@ -224,7 +222,7 @@ button:disabled {
 }
 
 .toggle-switch input:checked + .toggle-slider {
-  background: #4caf50;
+  background: #ffee00;
 }
 
 .toggle-switch input:checked + .toggle-slider::before {
@@ -251,7 +249,7 @@ button:disabled {
 }
 
 .mic-select:focus {
-  border-color: #4caf50;
+  border-color: #ffee00;
 }
 
 .mic-select option {
@@ -280,7 +278,7 @@ button:disabled {
 }
 
 .hotkey-input:focus {
-  border-color: #4caf50;
+  border-color: #ffee00;
 }
 
 .btn-save {
@@ -301,12 +299,12 @@ button:disabled {
 }
 
 .btn-save.changed {
-  background: #2d4a2d;
-  color: #6fcf6f;
+  background: #1e3948;
+  color: #64d2ff;
 }
 
 .btn-save.changed:hover {
-  background: #3a5e3a;
+  background: #2a4f66;
 }
 
 .hotkey-hint {
@@ -335,7 +333,7 @@ button:disabled {
   overflow-y: auto;
   white-space: pre-wrap;
   word-wrap: break-word;
-  user-select: text;
-  -webkit-user-select: text;
+  user-select: text !important;
+  -webkit-user-select: text !important;
   cursor: text;
 }

@@ -625,6 +625,18 @@ fn do_toggle_inner(state: &AppState, app: &AppHandle) -> Result<Option<String>, 
             Ok(_) => println!("[romescribe] Escape shortcut registered"),
             Err(e) => eprintln!("[romescribe] Failed to register Escape shortcut: {}", e),
         }
+
+        // Stream live audio peak to the overlay ~30Hz until recording stops.
+        let app_for_levels = app.clone();
+        std::thread::spawn(move || {
+            let state = app_for_levels.state::<AppState>();
+            while state.is_recording.load(Ordering::SeqCst) {
+                let peak = state.recorder.take_peak();
+                let _ = app_for_levels.emit("audio-level", peak);
+                std::thread::sleep(std::time::Duration::from_millis(33));
+            }
+        });
+
         Ok(None)
     }
 }
@@ -645,6 +657,7 @@ fn do_cancel(app: &AppHandle) {
         state.is_recording.store(false, Ordering::SeqCst);
         set_tray_recording(&app_clone, false);
         let _ = app_clone.emit("recording-stopped", ());
+        let _ = app_clone.emit("recording-cancelled", ());
 
         // Unregister Escape so it doesn't interfere with other apps
         let escape = Shortcut::new(None, Code::Escape);
@@ -885,6 +898,11 @@ pub fn run() {
         .setup(|app| {
             // Hide from Dock — run as menu bar only app
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            // Overlay is a floating indicator — must never steal clicks.
+            if let Some(overlay) = app.get_webview_window("overlay") {
+                let _ = overlay.set_ignore_cursor_events(true);
+            }
 
             let accessibility_granted = check_accessibility();
 

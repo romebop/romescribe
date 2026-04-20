@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicegui-org/nicegui/main/nicegui/templates/tauri_conf_schema.json",
   "productName": "romescribe",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "identifier": "com.romescribe.dev",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -10,13 +10,31 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
+        "label": "main",
         "title": "romescribe",
         "width": 400,
         "height": 740,
         "resizable": false,
         "center": true,
+        "visible": false
+      },
+      {
+        "label": "overlay",
+        "url": "overlay.html",
+        "title": "",
+        "width": 220,
+        "height": 64,
+        "center": true,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "focus": false,
+        "shadow": false,
         "visible": false
       }
     ],

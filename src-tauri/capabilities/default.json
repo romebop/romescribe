@@ -1,9 +1,11 @@
 {
   "identifier": "default",
   "description": "Default capabilities for romescribe",
-  "windows": ["main"],
+  "windows": ["main", "overlay"],
   "permissions": [
     "core:default",
+    "core:window:allow-show",
+    "core:window:allow-hide",
     "global-shortcut:allow-register",
     "global-shortcut:allow-unregister",
     "global-shortcut:allow-is-registered",
