@@ -631,8 +631,8 @@ fn do_toggle_inner(state: &AppState, app: &AppHandle) -> Result<Option<String>, 
         std::thread::spawn(move || {
             let state = app_for_levels.state::<AppState>();
             while state.is_recording.load(Ordering::SeqCst) {
-                let peak = state.recorder.take_peak();
-                let _ = app_for_levels.emit("audio-level", peak);
+                let spectrum = state.recorder.take_spectrum();
+                let _ = app_for_levels.emit("audio-level", spectrum);
                 std::thread::sleep(std::time::Duration::from_millis(33));
             }
         });

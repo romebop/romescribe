@@ -1,10 +1,16 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat};
+use rustfft::{num_complex::Complex, Fft, FftPlanner};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc, Arc, Mutex,
 };
 use std::thread;
+
+const FFT_SIZE: usize = 1024;
+const NUM_BANDS: usize = 10;
+const FREQ_LOW_HZ: f32 = 80.0;
+const FREQ_HIGH_HZ: f32 = 8000.0;
 
 enum AudioCommand {
     Start { ready: mpsc::Sender<Result<(), String>> },
@@ -46,7 +52,6 @@ fn build_stream(
     device: &Device,
     buf: &Arc<Mutex<Vec<f32>>>,
     rate: &Arc<Mutex<u32>>,
-    peak: &Arc<Mutex<f32>>,
     cmd_tx: &mpsc::Sender<AudioCommand>,
 ) -> Result<cpal::Stream, String> {
     let config = device
@@ -76,25 +81,14 @@ fn build_stream(
     let stream: cpal::Stream = match sample_format {
         SampleFormat::F32 => {
             let buf = buf.clone();
-            let peak = peak.clone();
             device
                 .build_input_stream(
                     &stream_config,
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
                         let mut b = buf.lock().unwrap();
-                        let mut local_peak: f32 = 0.0;
                         for chunk in data.chunks(channels) {
                             let mono: f32 = chunk.iter().sum::<f32>() / channels as f32;
                             b.push(mono);
-                            let a = mono.abs();
-                            if a > local_peak {
-                                local_peak = a;
-                            }
-                        }
-                        drop(b);
-                        let mut p = peak.lock().unwrap();
-                        if local_peak > *p {
-                            *p = local_peak;
                         }
                     },
                     err_fn,
@@ -104,13 +98,11 @@ fn build_stream(
         }
         SampleFormat::I16 => {
             let buf = buf.clone();
-            let peak = peak.clone();
             device
                 .build_input_stream(
                     &stream_config,
                     move |data: &[i16], _: &cpal::InputCallbackInfo| {
                         let mut b = buf.lock().unwrap();
-                        let mut local_peak: f32 = 0.0;
                         for chunk in data.chunks(channels) {
                             let mono: f32 = chunk
                                 .iter()
@@ -118,15 +110,6 @@ fn build_stream(
                                 .sum::<f32>()
                                 / channels as f32;
                             b.push(mono);
-                            let a = mono.abs();
-                            if a > local_peak {
-                                local_peak = a;
-                            }
-                        }
-                        drop(b);
-                        let mut p = peak.lock().unwrap();
-                        if local_peak > *p {
-                            *p = local_peak;
                         }
                     },
                     err_fn,
@@ -154,7 +137,8 @@ pub struct AudioRecorder {
     buffer: Arc<Mutex<Vec<f32>>>,
     sender: Mutex<mpsc::Sender<AudioCommand>>,
     sample_rate: Arc<Mutex<u32>>,
-    latest_peak: Arc<Mutex<f32>>,
+    fft: Arc<dyn Fft<f32>>,
+    hann: Vec<f32>,
 }
 
 unsafe impl Send for AudioRecorder {}
@@ -165,14 +149,12 @@ impl AudioRecorder {
         let buffer = Arc::new(Mutex::new(Vec::new()));
         let recording = Arc::new(AtomicBool::new(false));
         let sample_rate = Arc::new(Mutex::new(0u32));
-        let latest_peak = Arc::new(Mutex::new(0.0f32));
         let (tx, rx) = mpsc::channel::<AudioCommand>();
         let tx_for_thread = tx.clone();
 
         let buf = buffer.clone();
         let rec = recording.clone();
         let rate = sample_rate.clone();
-        let peak = latest_peak.clone();
         let initial_device_name = device_name.to_string();
 
         thread::spawn(move || {
@@ -186,7 +168,7 @@ impl AudioRecorder {
                 }
             };
 
-            let mut stream = match build_stream(&device, &buf, &rate, &peak, &cmd_tx) {
+            let mut stream = match build_stream(&device, &buf, &rate, &cmd_tx) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("[romescribe] Failed to open audio stream: {}", e);
@@ -201,7 +183,7 @@ impl AudioRecorder {
                     AudioCommand::SetDevice { name, done } => {
                         // Rebuild stream on the new device
                         match find_device(&name) {
-                            Some(d) => match build_stream(&d, &buf, &rate, &peak, &cmd_tx) {
+                            Some(d) => match build_stream(&d, &buf, &rate, &cmd_tx) {
                                 Ok(s) => {
                                     stream = s;
                                     current_device_name = name;
@@ -218,7 +200,7 @@ impl AudioRecorder {
                     }
                     AudioCommand::Rebuild { done } => {
                         match find_device(&current_device_name) {
-                            Some(d) => match build_stream(&d, &buf, &rate, &peak, &cmd_tx) {
+                            Some(d) => match build_stream(&d, &buf, &rate, &cmd_tx) {
                                 Ok(s) => {
                                     stream = s;
                                     println!("[romescribe] Audio stream rebuilt successfully");
@@ -235,7 +217,6 @@ impl AudioRecorder {
                     }
                     AudioCommand::Start { ready } => {
                         buf.lock().unwrap().clear();
-                        *peak.lock().unwrap() = 0.0;
                         if let Err(e) = stream.play() {
                             let _ = ready.send(Err(format!("Failed to start stream: {}", e)));
                             continue;
@@ -254,21 +235,83 @@ impl AudioRecorder {
             }
         });
 
+        let fft = FftPlanner::<f32>::new().plan_fft_forward(FFT_SIZE);
+        let hann: Vec<f32> = (0..FFT_SIZE)
+            .map(|n| {
+                0.5 - 0.5
+                    * (2.0 * std::f32::consts::PI * n as f32 / (FFT_SIZE - 1) as f32).cos()
+            })
+            .collect();
+
         Self {
             buffer,
             sender: Mutex::new(tx),
             sample_rate,
-            latest_peak,
+            fft,
+            hann,
         }
     }
 
-    /// Reads and clears the latest peak amplitude (abs mono sample) observed
-    /// since the last call. Used by the UI overlay to animate the waveform.
-    pub fn take_peak(&self) -> f32 {
-        let mut p = self.latest_peak.lock().unwrap();
-        let v = *p;
-        *p = 0.0;
-        v
+    /// Computes a log-spaced FFT spectrum (NUM_BANDS bands over the voice range)
+    /// from the most recent FFT_SIZE audio samples. Values are normalized to 0..1.
+    /// Returns all-zeros if not enough audio has been captured yet.
+    pub fn take_spectrum(&self) -> Vec<f32> {
+        let rate = *self.sample_rate.lock().unwrap() as f32;
+        if rate <= 0.0 {
+            return vec![0.0; NUM_BANDS];
+        }
+
+        let mut windowed: Vec<Complex<f32>> = {
+            let b = self.buffer.lock().unwrap();
+            if b.len() < FFT_SIZE {
+                return vec![0.0; NUM_BANDS];
+            }
+            let start = b.len() - FFT_SIZE;
+            b[start..]
+                .iter()
+                .zip(self.hann.iter())
+                .map(|(&s, &w)| Complex::new(s * w, 0.0))
+                .collect()
+        };
+
+        self.fft.process(&mut windowed);
+
+        let half = FFT_SIZE / 2;
+        let log_low = FREQ_LOW_HZ.ln();
+        let log_high = FREQ_HIGH_HZ.ln();
+        let mut bands = vec![0.0f32; NUM_BANDS];
+
+        for b in 0..NUM_BANDS {
+            let f0 = (log_low + (log_high - log_low) * b as f32 / NUM_BANDS as f32).exp();
+            let f1 =
+                (log_low + (log_high - log_low) * (b + 1) as f32 / NUM_BANDS as f32).exp();
+            let bin0 = ((f0 * FFT_SIZE as f32 / rate) as usize).max(1);
+            let bin1 = ((f1 * FFT_SIZE as f32 / rate) as usize)
+                .max(bin0 + 1)
+                .min(half);
+            // Max bin in band — avoids diluting strong harmonics across the many
+            // FFT bins that higher log-spaced bands cover.
+            let mut peak = 0.0f32;
+            for k in bin0..bin1 {
+                let m = windowed[k].norm();
+                if m > peak {
+                    peak = m;
+                }
+            }
+            bands[b] = peak;
+        }
+
+        // Map raw FFT magnitude to 0..1 via a dB curve tuned for speech after
+        // pre-emphasis: bars light up from ~-55 dB (quiet room tone) and
+        // saturate at ~-15 dB (loud speech), giving ~40 dB of dynamic range.
+        let scale = (FFT_SIZE as f32) * 0.25;
+        for m in bands.iter_mut() {
+            let norm = (*m / scale).max(1e-6);
+            let db = 20.0 * norm.log10();
+            *m = ((db + 50.0) / 25.0).clamp(0.0, 1.0);
+        }
+
+        bands
     }
 
     /// Switch to a different audio input device by name. Empty string = system default.
